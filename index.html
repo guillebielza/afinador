@@ -116,6 +116,18 @@ body[data-state="far"] #hint { color: var(--bad); }
   min-height: 1.3em;
 }
 
+.signal {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+#meter { width: 140px; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+#meter i { display: block; height: 100%; width: 0; background: var(--brass); transition: width .1s; }
+
 .strings-head {
   display: flex;
   justify-content: space-between;
@@ -191,6 +203,7 @@ body[data-state="far"] #hint { color: var(--bad); }
   <div id="sol">&nbsp;</div>
   <div id="hint" aria-live="polite">Toca una cuerda al aire</div>
   <div id="readout">&nbsp;</div>
+  <div class="signal" aria-hidden="true"><span>Micro</span><div id="meter"><i></i></div></div>
   <p id="error" hidden></p>
   <button id="start">Empezar<small>Pedirá permiso para el micrófono</small></button>
 </main>
@@ -271,16 +284,41 @@ const stringBtns = STRINGS.map((s, i) => {
 
 // ---------- Detección de tono (YIN) ----------
 const MIN_F = 60, MAX_F = 1000;
-let diff = null;
-function detectPitch(buf, sr) {
-  let rms = 0;
-  for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
-  rms = Math.sqrt(rms / buf.length);
-  if (rms < 0.008) return -1;
+const SETTLE = 64; // muestras que tarda el filtro en estabilizarse
+let diff = null, work = null, lp = null, level = 0;
 
+// Paso bajo (biquad, 1100 Hz): quita el siseo del micro y los armónicos muy agudos
+function lowpass(src, sr) {
+  if (!lp || lp.sr !== sr) {
+    const w = 2 * Math.PI * 1100 / sr, c = Math.cos(w), al = Math.sin(w) / (2 * 0.707), a0 = 1 + al;
+    lp = { sr, b0: (1 - c) / 2 / a0, b1: (1 - c) / a0, a1: -2 * c / a0, a2: (1 - al) / a0 };
+  }
+  const { b0, b1, a1, a2 } = lp;
+  if (!work || work.length !== src.length) work = new Float32Array(src.length);
+  let mean = 0;
+  for (let i = 0; i < src.length; i++) mean += src[i];
+  mean /= src.length;
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < src.length; i++) {
+    const x = src[i] - mean;
+    const y = b0 * x + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = x; y2 = y1; y1 = y;
+    work[i] = y;
+  }
+  return work.subarray(SETTLE);
+}
+
+function detectPitch(raw, sr) {
+  let rms = 0;
+  for (let i = 0; i < raw.length; i++) rms += raw[i] * raw[i];
+  level = Math.sqrt(rms / raw.length);
+  // Solo se descarta el silencio digital: decide la claridad de la nota, no el volumen
+  if (level < 0.0002) return -1;
+
+  const buf = lowpass(raw, sr);
   const tauMin = Math.floor(sr / MAX_F);
   const tauMax = Math.min(Math.ceil(sr / MIN_F), (buf.length >> 1) - 1);
-  const W = Math.min(buf.length - tauMax - 1, 2048);
+  const W = Math.min(buf.length - tauMax - 2, 2048);
   if (!diff || diff.length < tauMax + 2) diff = new Float32Array(tauMax + 2);
 
   for (let tau = 1; tau <= tauMax + 1; tau++) {
@@ -295,13 +333,34 @@ function detectPitch(buf, sr) {
     run += diff[tau];
     diff[tau] = run ? diff[tau] * tau / run : 1;
   }
-  let tau = -1;
+  let tau = -1, best = 1, bestTau = -1;
   for (let t = tauMin; t <= tauMax; t++) {
-    if (diff[t] < 0.12) {
+    if (diff[t] < best) { best = diff[t]; bestTau = t; }
+  }
+  for (let t = tauMin; t <= tauMax; t++) {
+    if (diff[t] < 0.15) {
       while (t + 1 <= tauMax && diff[t + 1] < diff[t]) t++;
       tau = t;
       break;
     }
+  }
+  // Nota débil o lejana: aceptar el mejor periodo si sigue siendo claramente una nota
+  // (el primer valle casi tan bueno como el mejor, para no quedarse con un múltiplo del periodo)
+  if (tau < 0) {
+    if (best > 0.3) return -1;
+    for (let t = tauMin; t <= bestTau; t++) {
+      if (diff[t] < best + 0.06) {
+        while (t + 1 <= tauMax && diff[t + 1] < diff[t]) t++;
+        tau = t;
+        break;
+      }
+    }
+  }
+  // Si el doble del periodo encaja mucho mejor, era un armónico: la nota real es una octava más grave
+  while (2 * tau * 1.03 < tauMax) {
+    let m = Math.floor(2 * tau * 0.97);
+    for (let t = m + 1; t <= Math.ceil(2 * tau * 1.03); t++) if (diff[t] < diff[m]) m = t;
+    if (diff[tau] > 0.04 && diff[m] < diff[tau] * 0.5) tau = m; else break;
   }
   if (tau < 1) return -1;
   const a = diff[tau - 1], b = diff[tau], c = diff[tau + 1];
@@ -374,21 +433,38 @@ function median(a) {
   return s[s.length >> 1];
 }
 
+// Una lectura que salta más de medio tono solo cuenta si la siguiente la confirma
+let pending = 0;
+function smooth(f) {
+  if (history.length && Math.abs(freqToMidi(f) - freqToMidi(median(history))) > 0.5) {
+    if (pending && Math.abs(freqToMidi(f) - freqToMidi(pending)) < 0.5) {
+      history = [pending];
+    } else {
+      pending = f;
+      return -1;
+    }
+  }
+  pending = 0;
+  history.push(f);
+  if (history.length > 5) history.shift();
+  return median(history);
+}
+
 function loop(now) {
   requestAnimationFrame(loop);
   if (++frame % 2 === 0) {
     analyser.getFloatTimeDomainData(buf);
     const f = detectPitch(buf, ctx.sampleRate);
-    if (f > 0) {
-      // Si salta más de medio tono, es una nota nueva: reiniciar el historial
-      if (history.length && Math.abs(freqToMidi(f) - freqToMidi(median(history))) > 0.5) history = [];
-      history.push(f);
-      if (history.length > 5) history.shift();
+    const m = f > 0 ? smooth(f) : -1;
+    if (m > 0) {
       lastHeard = now;
-      update(median(history));
+      update(m);
     }
   }
-  if (now - lastHeard > 1200 && document.body.dataset.state !== 'idle') idle();
+  if (now - lastHeard > 1500 && document.body.dataset.state !== 'idle') idle();
+  // Nivel del micro de -70 dB a -15 dB
+  const db = 20 * Math.log10(level || 1e-9);
+  meterFill.style.width = Math.max(0, Math.min(1, (db + 70) / 55)) * 100 + '%';
   // Aguja suavizada
   const target = document.body.dataset.state === 'idle' ? 0 : shownCents;
   needleCents += (target - needleCents) * 0.22;
@@ -396,6 +472,7 @@ function loop(now) {
   $('needle').setAttribute('transform', `rotate(${ang} ${CX} ${CY})`);
 }
 let needleCents = 0;
+const meterFill = document.querySelector('#meter i');
 
 function update(f) {
   const m = freqToMidi(f);
@@ -437,6 +514,7 @@ function idle() {
   $('hint').textContent = 'Toca una cuerda al aire';
   $('readout').innerHTML = '&nbsp;';
   history = [];
+  pending = 0;
 }
 
 // Mantener la pantalla encendida mientras afinas
