@@ -205,7 +205,7 @@ body[data-state="far"] #hint { color: var(--bad); }
   <div id="readout">&nbsp;</div>
   <div class="signal" aria-hidden="true"><span>Micro</span><div id="meter"><i></i></div></div>
   <p id="error" hidden></p>
-  <button id="start">Empezar<small>Pedirá permiso para el micrófono</small></button>
+  <button id="start">Empezar<small id="start-sub">Pedirá permiso para el micrófono</small></button>
 </main>
 
 <footer>
@@ -370,25 +370,40 @@ function detectPitch(raw, sr) {
 }
 
 // ---------- Bucle de audio ----------
-let running = false, ctx, analyser, buf, frame = 0;
+const DEMO = new URLSearchParams(location.search).has('demo');
+let running = false, starting = false, loopStarted = false, ctx, analyser, buf, frame = 0;
+let stream = null, src = null, demoTimer = 0;
 let history = [], shownCents = 0, lastHeard = 0, currentTarget = null;
+const wait = ms => new Promise(r => setTimeout(r, ms));
 
-async function start() {
-  if (running) return;
+// auto = true cuando arranca sola (al abrir la app o al volver a ella), sin que hayas tocado nada
+async function start(auto) {
+  if (running || starting) return;
+  starting = true;
   $('error').hidden = true;
   try {
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    await ctx.resume();
-    let src;
-    if (new URLSearchParams(location.search).has('demo')) {
-      src = demoSource(ctx);
-    } else {
+    if (!ctx || ctx.state === 'closed') ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const resumed = ctx.resume().catch(() => {});
+    if (!DEMO) {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('insecure');
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
       });
-      src = ctx.createMediaStreamSource(stream);
+      // Si el sistema corta el micro (una llamada, otra app), volver a ofrecer el botón
+      stream.getAudioTracks()[0].addEventListener('ended', () => { stop(); showStart(true); });
     }
+    await Promise.race([resumed, wait(1000)]);
+    if (ctx.state !== 'running') {
+      await Promise.race([ctx.resume().catch(() => {}), wait(1000)]);
+      if (ctx.state !== 'running') throw new Error('gesture');
+    }
+    // Saliste de la app mientras arrancaba: soltar el micro y retomarlo al volver
+    if (document.hidden) {
+      stop();
+      resumeOnReturn = true;
+      return;
+    }
+    src = DEMO ? demoSource(ctx) : ctx.createMediaStreamSource(stream);
     analyser = ctx.createAnalyser();
     analyser.fftSize = 4096;
     buf = new Float32Array(analyser.fftSize);
@@ -399,13 +414,45 @@ async function start() {
     running = true;
     $('start').hidden = true;
     keepAwake();
-    requestAnimationFrame(loop);
+    if (!loopStarted) { loopStarted = true; requestAnimationFrame(loop); }
   } catch (e) {
-    $('error').hidden = false;
-    $('error').textContent = e.message === 'insecure'
-      ? 'El micrófono solo funciona si abres la app desde una dirección https://.'
-      : 'No se pudo usar el micrófono. Revisa el permiso en los ajustes del navegador y vuelve a intentarlo.';
+    stop();
+    const permissionOk = await micGranted();
+    showStart(permissionOk);
+    // Si arrancó sola y el navegador pide un toque, basta con el botón: no es un error
+    if (!(auto && permissionOk) && e.message !== 'gesture') {
+      $('error').hidden = false;
+      $('error').textContent = e.message === 'insecure'
+        ? 'El micrófono solo funciona si abres la app desde una dirección https://.'
+        : 'No se pudo usar el micrófono. Revisa el permiso en los ajustes del navegador y vuelve a intentarlo.';
+    }
+  } finally {
+    starting = false;
   }
+}
+
+// Suelta el micro (al salir de la app), como hacen las apps nativas
+function stop() {
+  running = false;
+  stream?.getTracks().forEach(t => t.stop());
+  stream = null;
+  try { src?.disconnect(); } catch (e) {}
+  src = null;
+  clearInterval(demoTimer);
+  level = 0;
+  idle();
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+
+function showStart(permissionOk) {
+  $('start').hidden = false;
+  $('start-sub').textContent = permissionOk ? 'Toca para escuchar' : 'Pedirá permiso para el micrófono';
+}
+
+async function micGranted() {
+  try { return (await navigator.permissions.query({ name: 'microphone' })).state === 'granted'; }
+  catch (e) { return false; }
 }
 
 // Modo prueba (?demo): una onda con armónicos que recorre las cuerdas algo desafinada
@@ -423,7 +470,7 @@ function demoSource(ctx) {
     k++;
   };
   step();
-  setInterval(step, 3000);
+  demoTimer = setInterval(step, 3000);
   osc.start();
   return g;
 }
@@ -452,7 +499,7 @@ function smooth(f) {
 
 function loop(now) {
   requestAnimationFrame(loop);
-  if (++frame % 2 === 0) {
+  if (running && ++frame % 2 === 0) {
     analyser.getFloatTimeDomainData(buf);
     const f = detectPitch(buf, ctx.sampleRate);
     const m = f > 0 ? smooth(f) : -1;
@@ -522,11 +569,26 @@ let wakeLock = null;
 async function keepAwake() {
   try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
 }
+// Al salir de la app se suelta el micro; al volver se recupera solo
+let resumeOnReturn = false;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && running) { keepAwake(); ctx.resume(); }
+  if (document.visibilityState === 'hidden') {
+    if (running || starting) resumeOnReturn = true;
+    stop();
+    ctx?.suspend().catch(() => {});
+  } else if (resumeOnReturn) {
+    resumeOnReturn = false;
+    start(true);
+  }
 });
 
-$('start').addEventListener('click', start);
+$('start').addEventListener('click', () => start(false));
+
+// Si ya diste permiso otra vez, empieza a escuchar nada más abrir
+micGranted().then(ok => {
+  if (ok && !DEMO) start(true);
+  else if (ok) showStart(true);
+});
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
