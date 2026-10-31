@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Afinador</title>
+<meta name="theme-color" content="#1b1411">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Afinador">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+/* Una sola pantalla: aguja arriba, nota grande en el centro, las 6 cuerdas abajo al alcance del pulgar */
+:root {
+  --bg: #f4f1ec;
+  --surface: #ffffff;
+  --line: #ddd3c7;
+  --fg: #2a1d15;
+  --muted: #7a6656;
+  --brass: #a8761c;
+  --ok: #1f9a50;
+  --warn: #b8730f;
+  --bad: #c2412b;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1411;
+    --surface: #261c17;
+    --line: #3d2f27;
+    --fg: #f1e6d8;
+    --muted: #a8927d;
+    --brass: #d7a54a;
+    --ok: #6fcf8b;
+    --warn: #e8a33d;
+    --bad: #e8735c;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  padding-top: max(12px, env(safe-area-inset-top, 0px));
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  max-width: 520px;
+  margin-inline: auto;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+header b { color: var(--fg); letter-spacing: .12em; }
+main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  min-height: 0;
+}
+#gauge { width: 100%; max-width: 420px; height: auto; display: block; }
+#gauge .tick { stroke: var(--line); stroke-width: 2; stroke-linecap: round; }
+#gauge .tick.major { stroke: var(--muted); stroke-width: 3; }
+#gauge .lbl { fill: var(--muted); font: 600 11px var(--font); text-anchor: middle; }
+#gauge .zone { stroke: var(--ok); stroke-width: 10; fill: none; opacity: .25; stroke-linecap: round; }
+#needle line { stroke: var(--muted); stroke-width: 4; stroke-linecap: round; transition: stroke .2s; }
+#needle circle { fill: var(--fg); }
+body[data-state="ok"] #needle line { stroke: var(--ok); }
+body[data-state="low"] #needle line,
+body[data-state="high"] #needle line { stroke: var(--warn); }
+body[data-state="far"] #needle line { stroke: var(--bad); }
+
+.note { display: flex; align-items: flex-start; line-height: 1; margin-top: -8px; }
+#note {
+  font-size: clamp(88px, 28vw, 140px);
+  font-weight: 700;
+  letter-spacing: -.03em;
+  transition: color .2s, opacity .3s;
+}
+#octave { font-size: 28px; font-weight: 600; color: var(--muted); margin-top: 14px; margin-left: 4px; }
+body[data-state="ok"] #note { color: var(--ok); }
+body[data-state="idle"] #note { opacity: .35; }
+#sol { font-size: 18px; color: var(--muted); margin-top: -4px; }
+
+#hint {
+  font-size: 20px;
+  font-weight: 600;
+  min-height: 1.4em;
+  text-align: center;
+}
+body[data-state="ok"] #hint { color: var(--ok); }
+body[data-state="low"] #hint, body[data-state="high"] #hint { color: var(--warn); }
+body[data-state="far"] #hint { color: var(--bad); }
+#readout {
+  font-size: 14px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-height: 1.3em;
+}
+
+.strings-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+#strings {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+#strings button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  padding-block: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+#strings button b { font-size: 22px; }
+#strings button small { font-size: 11px; color: var(--muted); }
+#strings button.near { border-color: var(--brass); }
+#strings button.locked { border-color: var(--brass); background: var(--brass); color: var(--bg); }
+#strings button.locked small { color: var(--bg); }
+#strings button:focus-visible, #start:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+
+#start {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(100%, 320px);
+  height: fit-content;
+  font: 700 22px var(--font);
+  color: var(--bg);
+  background: var(--brass);
+  border: 0;
+  border-radius: 999px;
+  padding: 22px 28px;
+  cursor: pointer;
+  box-shadow: 0 8px 30px rgba(0,0,0,.25);
+}
+#start small { display: block; font-size: 13px; font-weight: 500; margin-top: 4px; opacity: .85; }
+#error { color: var(--bad); text-align: center; font-size: 15px; max-width: 32ch; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body data-state="idle">
+
+<header>
+  <b>Afinador</b>
+  <span>Estándar · La = 440 Hz</span>
+</header>
+
+<main>
+  <svg id="gauge" viewBox="0 0 300 175" aria-hidden="true">
+    <g id="ticks"></g>
+    <path class="zone" id="zone"></path>
+    <g id="needle">
+      <line x1="150" y1="165" x2="150" y2="42"></line>
+      <circle cx="150" cy="165" r="7"></circle>
+    </g>
+  </svg>
+  <div class="note"><span id="note">–</span><span id="octave"></span></div>
+  <div id="sol">&nbsp;</div>
+  <div id="hint" aria-live="polite">Toca una cuerda al aire</div>
+  <div id="readout">&nbsp;</div>
+  <p id="error" hidden></p>
+  <button id="start">Empezar<small>Pedirá permiso para el micrófono</small></button>
+</main>
+
+<footer>
+  <div class="strings-head"><span>Cuerdas</span><span id="mode">Automático</span></div>
+  <div id="strings"></div>
+</footer>
+
+<script>
+const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SOL   = ['Do','Do#','Re','Re#','Mi','Fa','Fa#','Sol','Sol#','La','La#','Si'];
+// Afinación estándar, de la 6ª (grave) a la 1ª (aguda), en números MIDI
+const STRINGS = [
+  { n: 6, midi: 40 }, { n: 5, midi: 45 }, { n: 4, midi: 50 },
+  { n: 3, midi: 55 }, { n: 2, midi: 59 }, { n: 1, midi: 64 },
+];
+const A4 = 440;
+const IN_TUNE = 5;   // ± cents que cuentan como afinado
+const RANGE = 50;    // ± cents que cubre la aguja
+const MAX_ANGLE = 60;
+
+const $ = id => document.getElementById(id);
+const midiToFreq = m => A4 * 2 ** ((m - 69) / 12);
+const freqToMidi = f => 69 + 12 * Math.log2(f / A4);
+
+// ---------- Escala de la aguja ----------
+const CX = 150, CY = 165, R = 130;
+function polar(angleDeg, r) {
+  const a = (angleDeg - 90) * Math.PI / 180;
+  return [CX + r * Math.cos(a), CY + r * Math.sin(a)];
+}
+(function drawScale() {
+  const ns = 'http://www.w3.org/2000/svg';
+  const g = $('ticks');
+  for (let c = -RANGE; c <= RANGE; c += 5) {
+    const ang = c / RANGE * MAX_ANGLE;
+    const major = c % 25 === 0;
+    const [x1, y1] = polar(ang, R);
+    const [x2, y2] = polar(ang, major ? R - 16 : R - 9);
+    const t = document.createElementNS(ns, 'line');
+    t.setAttribute('x1', x1); t.setAttribute('y1', y1);
+    t.setAttribute('x2', x2); t.setAttribute('y2', y2);
+    t.setAttribute('class', major ? 'tick major' : 'tick');
+    g.appendChild(t);
+    if (major) {
+      const [lx, ly] = polar(ang, R + 12);
+      const l = document.createElementNS(ns, 'text');
+      l.setAttribute('x', lx); l.setAttribute('y', ly + 4);
+      l.setAttribute('class', 'lbl');
+      l.textContent = c > 0 ? '+' + c : c;
+      g.appendChild(l);
+    }
+  }
+  const zr = R - 4;
+  const zA = IN_TUNE / RANGE * MAX_ANGLE;
+  const [zx1, zy1] = polar(-zA, zr), [zx2, zy2] = polar(zA, zr);
+  $('zone').setAttribute('d', `M${zx1} ${zy1} A${zr} ${zr} 0 0 1 ${zx2} ${zy2}`);
+})();
+
+// ---------- Botones de cuerdas ----------
+let locked = null; // índice de cuerda fijada, o null = automático
+const stringBtns = STRINGS.map((s, i) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.id = 'string-' + s.n;
+  b.innerHTML = `<b>${NOTES[s.midi % 12]}</b><small>${s.n}ª · ${SOL[s.midi % 12]}</small>`;
+  b.setAttribute('aria-label', `Cuerda ${s.n}, ${SOL[s.midi % 12]}`);
+  b.addEventListener('click', () => {
+    locked = locked === i ? null : i;
+    stringBtns.forEach((x, j) => x.classList.toggle('locked', j === locked));
+    $('mode').textContent = locked === null ? 'Automático' : `Fijada: ${STRINGS[locked].n}ª cuerda`;
+    if (!running) start();
+  });
+  $('strings').appendChild(b);
+  return b;
+});
+
+// ---------- Detección de tono (YIN) ----------
+const MIN_F = 60, MAX_F = 1000;
+let diff = null;
+function detectPitch(buf, sr) {
+  let rms = 0;
+  for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / buf.length);
+  if (rms < 0.008) return -1;
+
+  const tauMin = Math.floor(sr / MAX_F);
+  const tauMax = Math.min(Math.ceil(sr / MIN_F), (buf.length >> 1) - 1);
+  const W = Math.min(buf.length - tauMax - 1, 2048);
+  if (!diff || diff.length < tauMax + 2) diff = new Float32Array(tauMax + 2);
+
+  for (let tau = 1; tau <= tauMax + 1; tau++) {
+    let s = 0;
+    for (let i = 0; i < W; i++) { const v = buf[i] - buf[i + tau]; s += v * v; }
+    diff[tau] = s;
+  }
+  // Diferencia normalizada acumulada
+  diff[0] = 1;
+  let run = 0;
+  for (let tau = 1; tau <= tauMax + 1; tau++) {
+    run += diff[tau];
+    diff[tau] = run ? diff[tau] * tau / run : 1;
+  }
+  let tau = -1;
+  for (let t = tauMin; t <= tauMax; t++) {
+    if (diff[t] < 0.12) {
+      while (t + 1 <= tauMax && diff[t + 1] < diff[t]) t++;
+      tau = t;
+      break;
+    }
+  }
+  if (tau < 1) return -1;
+  const a = diff[tau - 1], b = diff[tau], c = diff[tau + 1];
+  const den = a + c - 2 * b;
+  const shift = den ? (a - c) / (2 * den) : 0;
+  return sr / (tau + shift);
+}
+
+// ---------- Bucle de audio ----------
+let running = false, ctx, analyser, buf, frame = 0;
+let history = [], shownCents = 0, lastHeard = 0, currentTarget = null;
+
+async function start() {
+  if (running) return;
+  $('error').hidden = true;
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    let src;
+    if (new URLSearchParams(location.search).has('demo')) {
+      src = demoSource(ctx);
+    } else {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('insecure');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      src = ctx.createMediaStreamSource(stream);
+    }
+    analyser = ctx.createAnalyser();
+    analyser.fftSize = 4096;
+    buf = new Float32Array(analyser.fftSize);
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    src.connect(analyser);
+    analyser.connect(mute).connect(ctx.destination);
+    running = true;
+    $('start').hidden = true;
+    keepAwake();
+    requestAnimationFrame(loop);
+  } catch (e) {
+    $('error').hidden = false;
+    $('error').textContent = e.message === 'insecure'
+      ? 'El micrófono solo funciona si abres la app desde una dirección https://.'
+      : 'No se pudo usar el micrófono. Revisa el permiso en los ajustes del navegador y vuelve a intentarlo.';
+  }
+}
+
+// Modo prueba (?demo): una onda con armónicos que recorre las cuerdas algo desafinada
+function demoSource(ctx) {
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth';
+  const g = ctx.createGain();
+  g.gain.value = 0.3;
+  osc.connect(g);
+  let k = 0;
+  const step = () => {
+    const s = STRINGS[k % 6];
+    const off = [-30, 12, -4, 2, 25, -12][k % 6];
+    osc.frequency.setValueAtTime(midiToFreq(s.midi + off / 100), ctx.currentTime);
+    k++;
+  };
+  step();
+  setInterval(step, 3000);
+  osc.start();
+  return g;
+}
+
+function median(a) {
+  const s = [...a].sort((x, y) => x - y);
+  return s[s.length >> 1];
+}
+
+function loop(now) {
+  requestAnimationFrame(loop);
+  if (++frame % 2 === 0) {
+    analyser.getFloatTimeDomainData(buf);
+    const f = detectPitch(buf, ctx.sampleRate);
+    if (f > 0) {
+      // Si salta más de medio tono, es una nota nueva: reiniciar el historial
+      if (history.length && Math.abs(freqToMidi(f) - freqToMidi(median(history))) > 0.5) history = [];
+      history.push(f);
+      if (history.length > 5) history.shift();
+      lastHeard = now;
+      update(median(history));
+    }
+  }
+  if (now - lastHeard > 1200 && document.body.dataset.state !== 'idle') idle();
+  // Aguja suavizada
+  const target = document.body.dataset.state === 'idle' ? 0 : shownCents;
+  needleCents += (target - needleCents) * 0.22;
+  const ang = Math.max(-1, Math.min(1, needleCents / RANGE)) * MAX_ANGLE;
+  $('needle').setAttribute('transform', `rotate(${ang} ${CX} ${CY})`);
+}
+let needleCents = 0;
+
+function update(f) {
+  const m = freqToMidi(f);
+  let si = locked;
+  if (si === null) {
+    si = 0;
+    for (let i = 1; i < STRINGS.length; i++)
+      if (Math.abs(m - STRINGS[i].midi) < Math.abs(m - STRINGS[si].midi)) si = i;
+  }
+  const s = STRINGS[si];
+  const cents = (m - s.midi) * 100;
+  shownCents = cents;
+
+  if (currentTarget !== si) {
+    currentTarget = si;
+    stringBtns.forEach((b, j) => b.classList.toggle('near', j === si));
+    $('note').textContent = NOTES[s.midi % 12];
+    $('octave').textContent = Math.floor(s.midi / 12) - 1;
+    $('sol').textContent = `${SOL[s.midi % 12]} · ${s.n}ª cuerda`;
+  }
+
+  const abs = Math.abs(cents);
+  let state, hint;
+  if (abs <= IN_TUNE) { state = 'ok'; hint = '¡Afinada!'; }
+  else if (abs > RANGE) { state = 'far'; hint = cents < 0 ? 'Muy grave: tensa la cuerda ↑' : 'Muy aguda: afloja la cuerda ↓'; }
+  else if (cents < 0) { state = 'low'; hint = 'Tensa un poco ↑'; }
+  else { state = 'high'; hint = 'Afloja un poco ↓'; }
+  document.body.dataset.state = state;
+  $('hint').textContent = hint;
+
+  const heard = Math.round(m);
+  const sign = cents > 0 ? '+' : '';
+  $('readout').textContent =
+    `${f.toFixed(1)} Hz · ${sign}${Math.round(cents)} cents · suena ${NOTES[((heard % 12) + 12) % 12]}${Math.floor(heard / 12) - 1}`;
+}
+
+function idle() {
+  document.body.dataset.state = 'idle';
+  $('hint').textContent = 'Toca una cuerda al aire';
+  $('readout').innerHTML = '&nbsp;';
+  history = [];
+}
+
+// Mantener la pantalla encendida mientras afinas
+let wakeLock = null;
+async function keepAwake() {
+  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) { keepAwake(); ctx.resume(); }
+});
+
+$('start').addEventListener('click', start);
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
