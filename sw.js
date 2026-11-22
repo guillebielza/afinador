@@ -1,7 +1,7 @@
 // Guarda la app en el móvil para que funcione sin conexión.
 // Primero intenta la versión de internet (así las actualizaciones llegan al momento)
 // y si no hay conexión usa la guardada. Cambia el número de versión al modificar archivos.
-const CACHE = 'afinador-v3';
+const CACHE = 'afinador-v4';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

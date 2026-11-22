@@ -60,13 +60,33 @@ body {
 header {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   font-size: 13px;
   letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--muted);
 }
 header b { color: var(--fg); letter-spacing: .12em; }
+#instrument {
+  display: flex;
+  background: var(--surface);
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  padding: 2px;
+}
+#instrument button {
+  font: 600 12px var(--font);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+#instrument button[aria-pressed="true"] { background: var(--brass); color: var(--bg); }
+#instrument button:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
 main {
   display: flex;
   flex-direction: column;
@@ -187,7 +207,10 @@ body[data-state="far"] #hint { color: var(--bad); }
 
 <header>
   <b>Afinador</b>
-  <span>Estándar · La = 440 Hz</span>
+  <div id="instrument" role="group" aria-label="Instrumento">
+    <button type="button" data-inst="guitar">Guitarra</button>
+    <button type="button" data-inst="ukulele">Ukelele</button>
+  </div>
 </header>
 
 <main>
@@ -209,18 +232,26 @@ body[data-state="far"] #hint { color: var(--bad); }
 </main>
 
 <footer>
-  <div class="strings-head"><span>Cuerdas</span><span id="mode">Automático</span></div>
+  <div class="strings-head"><span id="tuning-name">Cuerdas</span><span id="mode">Automático</span></div>
   <div id="strings"></div>
 </footer>
 
 <script>
 const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const SOL   = ['Do','Do#','Re','Re#','Mi','Fa','Fa#','Sol','Sol#','La','La#','Si'];
-// Afinación estándar, de la 6ª (grave) a la 1ª (aguda), en números MIDI
-const STRINGS = [
-  { n: 6, midi: 40 }, { n: 5, midi: 45 }, { n: 4, midi: 50 },
-  { n: 3, midi: 55 }, { n: 2, midi: 59 }, { n: 1, midi: 64 },
-];
+// Afinaciones estándar, en el orden en que se ven las cuerdas (números MIDI)
+const INSTRUMENTS = {
+  // Guitarra: de la 6ª (grave) a la 1ª (aguda), EADGBE
+  guitar: { label: 'Guitarra · EADGBE', strings: [
+    { n: 6, midi: 40 }, { n: 5, midi: 45 }, { n: 4, midi: 50 },
+    { n: 3, midi: 55 }, { n: 2, midi: 59 }, { n: 1, midi: 64 },
+  ] },
+  // Ukelele soprano/concierto/tenor: GCEA con el Sol agudo (de la 4ª a la 1ª)
+  ukulele: { label: 'Ukelele · GCEA', strings: [
+    { n: 4, midi: 67 }, { n: 3, midi: 60 }, { n: 2, midi: 64 }, { n: 1, midi: 69 },
+  ] },
+};
+let STRINGS = INSTRUMENTS.guitar.strings;
 const A4 = 440;
 const IN_TUNE = 5;   // ± cents que cuentan como afinado
 const RANGE = 50;    // ± cents que cubre la aguja
@@ -266,21 +297,47 @@ function polar(angleDeg, r) {
 
 // ---------- Botones de cuerdas ----------
 let locked = null; // índice de cuerda fijada, o null = automático
-const stringBtns = STRINGS.map((s, i) => {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.id = 'string-' + s.n;
-  b.innerHTML = `<b>${NOTES[s.midi % 12]}</b><small>${s.n}ª · ${SOL[s.midi % 12]}</small>`;
-  b.setAttribute('aria-label', `Cuerda ${s.n}, ${SOL[s.midi % 12]}`);
-  b.addEventListener('click', () => {
-    locked = locked === i ? null : i;
-    stringBtns.forEach((x, j) => x.classList.toggle('locked', j === locked));
-    $('mode').textContent = locked === null ? 'Automático' : `Fijada: ${STRINGS[locked].n}ª cuerda`;
-    if (!running) start();
+let stringBtns = [];
+function buildStrings() {
+  const box = $('strings');
+  box.textContent = '';
+  box.style.gridTemplateColumns = `repeat(${STRINGS.length}, 1fr)`;
+  stringBtns = STRINGS.map((s, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = 'string-' + s.n;
+    b.innerHTML = `<b>${NOTES[s.midi % 12]}</b><small>${s.n}ª · ${SOL[s.midi % 12]}</small>`;
+    b.setAttribute('aria-label', `Cuerda ${s.n}, ${SOL[s.midi % 12]}`);
+    b.addEventListener('click', () => {
+      locked = locked === i ? null : i;
+      stringBtns.forEach((x, j) => x.classList.toggle('locked', j === locked));
+      $('mode').textContent = locked === null ? 'Automático' : `Fijada: ${STRINGS[locked].n}ª cuerda`;
+      if (!running) start();
+    });
+    box.appendChild(b);
+    return b;
   });
-  $('strings').appendChild(b);
-  return b;
-});
+}
+
+// ---------- Instrumento (se recuerda para la próxima vez) ----------
+function setInstrument(name) {
+  if (!INSTRUMENTS[name]) name = 'guitar';
+  STRINGS = INSTRUMENTS[name].strings;
+  try { localStorage.setItem('instrument', name); } catch (e) {}
+  document.querySelectorAll('#instrument button').forEach(b =>
+    b.setAttribute('aria-pressed', b.dataset.inst === name));
+  $('tuning-name').textContent = INSTRUMENTS[name].label;
+  locked = null;
+  currentTarget = null;
+  $('mode').textContent = 'Automático';
+  buildStrings();
+  idle();
+  $('note').textContent = '–';
+  $('octave').textContent = '';
+  $('sol').innerHTML = '&nbsp;';
+}
+document.querySelectorAll('#instrument button').forEach(b =>
+  b.addEventListener('click', () => setInstrument(b.dataset.inst)));
 
 // ---------- Detección de tono (YIN) ----------
 const MIN_F = 60, MAX_F = 1000;
@@ -464,7 +521,7 @@ function demoSource(ctx) {
   osc.connect(g);
   let k = 0;
   const step = () => {
-    const s = STRINGS[k % 6];
+    const s = STRINGS[k % STRINGS.length];
     const off = [-30, 12, -4, 2, 25, -12][k % 6];
     osc.frequency.setValueAtTime(midiToFreq(s.midi + off / 100), ctx.currentTime);
     k++;
@@ -583,6 +640,10 @@ document.addEventListener('visibilitychange', () => {
 });
 
 $('start').addEventListener('click', () => start(false));
+
+let savedInstrument = 'guitar';
+try { savedInstrument = localStorage.getItem('instrument') || 'guitar'; } catch (e) {}
+setInstrument(savedInstrument);
 
 // Si ya diste permiso otra vez, empieza a escuchar nada más abrir
 micGranted().then(ok => {
