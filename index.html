@@ -181,7 +181,22 @@ body[data-state="far"] #hint { color: var(--bad); }
 #strings button.near { border-color: var(--brass); }
 #strings button.locked { border-color: var(--brass); background: var(--brass); color: var(--bg); }
 #strings button.locked small { color: var(--bg); }
-#strings button:focus-visible, #start:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+#strings button:focus-visible, #start:focus-visible, #play:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+
+#play {
+  width: 100%;
+  margin-top: 8px;
+  font: 600 15px var(--font);
+  color: var(--brass);
+  background: var(--surface);
+  border: 2px solid var(--line);
+  border-radius: 12px;
+  padding: 11px;
+  cursor: pointer;
+  transition: border-color .15s;
+}
+#play[aria-pressed="true"] { border-color: var(--brass); }
+body.playing #start { display: none; }
 
 #start {
   position: absolute;
@@ -234,6 +249,7 @@ body[data-state="far"] #hint { color: var(--bad); }
 <footer>
   <div class="strings-head"><span id="tuning-name">Cuerdas</span><span id="mode">Automático</span></div>
   <div id="strings"></div>
+  <button type="button" id="play" aria-pressed="false">▶ Escuchar las cuerdas</button>
 </footer>
 
 <script>
@@ -327,11 +343,19 @@ function setInstrument(name) {
   document.querySelectorAll('#instrument button').forEach(b =>
     b.setAttribute('aria-pressed', b.dataset.inst === name));
   $('tuning-name').textContent = INSTRUMENTS[name].label;
+  stopStrings();
   locked = null;
   currentTarget = null;
   $('mode').textContent = 'Automático';
   buildStrings();
+  clearNote();
+  $('play').textContent = playLabel();
+}
+
+function clearNote() {
   idle();
+  currentTarget = null;
+  stringBtns.forEach(b => b.classList.remove('near'));
   $('note').textContent = '–';
   $('octave').textContent = '';
   $('sol').innerHTML = '&nbsp;';
@@ -556,7 +580,7 @@ function smooth(f) {
 
 function loop(now) {
   requestAnimationFrame(loop);
-  if (running && ++frame % 2 === 0) {
+  if (running && !playback && ++frame % 2 === 0) {
     analyser.getFloatTimeDomainData(buf);
     const f = detectPitch(buf, ctx.sampleRate);
     const m = f > 0 ? smooth(f) : -1;
@@ -565,7 +589,7 @@ function loop(now) {
       update(m);
     }
   }
-  if (now - lastHeard > 1500 && document.body.dataset.state !== 'idle') idle();
+  if (!playback && now - lastHeard > 1500 && document.body.dataset.state !== 'idle') idle();
   // Nivel del micro de -70 dB a -15 dB
   const db = 20 * Math.log10(level || 1e-9);
   meterFill.style.width = Math.max(0, Math.min(1, (db + 70) / 55)) * 100 + '%';
@@ -590,13 +614,7 @@ function update(f) {
   const cents = (m - s.midi) * 100;
   shownCents = cents;
 
-  if (currentTarget !== si) {
-    currentTarget = si;
-    stringBtns.forEach((b, j) => b.classList.toggle('near', j === si));
-    $('note').textContent = NOTES[s.midi % 12];
-    $('octave').textContent = Math.floor(s.midi / 12) - 1;
-    $('sol').textContent = `${SOL[s.midi % 12]} · ${s.n}ª cuerda`;
-  }
+  if (currentTarget !== si) showString(si);
 
   const abs = Math.abs(cents);
   let state, hint;
@@ -612,6 +630,105 @@ function update(f) {
   $('readout').textContent =
     `${f.toFixed(1)} Hz · ${sign}${Math.round(cents)} cents · suena ${NOTES[((heard % 12) + 12) % 12]}${Math.floor(heard / 12) - 1}`;
 }
+
+function showString(si) {
+  const s = STRINGS[si];
+  currentTarget = si;
+  stringBtns.forEach((b, j) => b.classList.toggle('near', j === si));
+  $('note').textContent = NOTES[s.midi % 12];
+  $('octave').textContent = Math.floor(s.midi / 12) - 1;
+  $('sol').textContent = `${SOL[s.midi % 12]} · ${s.n}ª cuerda`;
+}
+
+// ---------- Referencia: suenan las cuerdas al aire bien afinadas, de la 1ª en tocarse a la última ----------
+const PLUCK_GAP = 0.85; // segundos entre una cuerda y la siguiente
+const PLUCK_LEN = 2.6;  // segundos que suena cada cuerda
+const pluckCache = new Map();
+let playback = null;    // { out, timers } mientras suena
+
+const playLabel = () => `▶ Escuchar las ${STRINGS.length} cuerdas`;
+
+// Cuerda pulsada sintetizada (Karplus-Strong). El retardo fraccional (all-pass)
+// deja la nota exacta, sin el error de redondear el periodo a muestras enteras.
+function pluckBuffer(midi) {
+  const sr = ctx.sampleRate, key = midi + '@' + sr;
+  if (pluckCache.has(key)) return pluckCache.get(key);
+  const f = midiToFreq(midi), len = Math.floor(sr * PLUCK_LEN);
+  const buffer = ctx.createBuffer(1, len, sr);
+  const out = buffer.getChannelData(0);
+  // Retardo total del lazo = N (línea) + 0,5 (promedio) + d (all-pass) = un periodo
+  const P = sr / f;
+  let N = Math.floor(P - 0.5), d = P - 0.5 - N;
+  if (d < 0.1) { N--; d++; }
+  const C = (1 - d) / (1 + d);
+  const rho = Math.pow(0.001, 1 / (f * 5)); // se apaga en ~5 s
+  // Púa: ruido suavizado y sin componente continua
+  const line = new Float32Array(N);
+  let s = 0, mean = 0;
+  for (let i = 0; i < N; i++) { s += 0.5 * (Math.random() * 2 - 1 - s); line[i] = s; mean += s; }
+  mean /= N;
+  for (let i = 0; i < N; i++) line[i] -= mean;
+  let idx = 0, prev = 0, apX = 0, apY = 0, peak = 0;
+  for (let n = 0; n < len; n++) {
+    const cur = line[idx];
+    out[n] = cur;
+    if (Math.abs(cur) > peak) peak = Math.abs(cur);
+    const avg = rho * 0.5 * (cur + prev);
+    prev = cur;
+    const y = C * avg + apX - C * apY;
+    apX = avg; apY = y;
+    line[idx] = y;
+    if (++idx === N) idx = 0;
+  }
+  // Volumen igualado entre cuerdas y final suave para que no haga clic
+  const fade = Math.floor(sr * 0.4);
+  for (let n = 0; n < len; n++) {
+    out[n] *= 0.7 / peak * (n > len - fade ? (len - n) / fade : 1);
+  }
+  pluckCache.set(key, buffer);
+  return buffer;
+}
+
+function playStrings() {
+  if (playback) { stopStrings(); return; }
+  if (!ctx || ctx.state === 'closed') ctx = new (window.AudioContext || window.webkitAudioContext)();
+  ctx.resume().catch(() => {});
+  const out = ctx.createGain();
+  const tone = ctx.createBiquadFilter();
+  tone.type = 'lowpass';
+  tone.frequency.value = 3500;
+  out.connect(tone).connect(ctx.destination);
+  const lead = 0.08, t0 = ctx.currentTime + lead;
+  const timers = [];
+  STRINGS.forEach((s, i) => {
+    const node = ctx.createBufferSource();
+    node.buffer = pluckBuffer(s.midi);
+    node.connect(out);
+    node.start(t0 + i * PLUCK_GAP);
+    timers.push(setTimeout(() => showString(i), (lead + i * PLUCK_GAP) * 1000));
+  });
+  timers.push(setTimeout(stopStrings, (lead + (STRINGS.length - 1) * PLUCK_GAP + PLUCK_LEN) * 1000));
+  playback = { out, timers };
+  // Mientras suena la referencia el afinador no escucha, para no reaccionar al altavoz
+  clearNote();
+  $('hint').textContent = 'Así suenan bien afinadas';
+  $('play').textContent = '■ Parar';
+  $('play').setAttribute('aria-pressed', 'true');
+  document.body.classList.add('playing');
+}
+
+function stopStrings() {
+  if (!playback) return;
+  playback.timers.forEach(clearTimeout);
+  try { playback.out.disconnect(); } catch (e) {}
+  playback = null;
+  $('play').textContent = playLabel();
+  $('play').setAttribute('aria-pressed', 'false');
+  document.body.classList.remove('playing');
+  clearNote();
+  lastHeard = 0;
+}
+$('play').addEventListener('click', playStrings);
 
 function idle() {
   document.body.dataset.state = 'idle';
@@ -631,6 +748,7 @@ let resumeOnReturn = false;
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     if (running || starting) resumeOnReturn = true;
+    stopStrings();
     stop();
     ctx?.suspend().catch(() => {});
   } else if (resumeOnReturn) {
